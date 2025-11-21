@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Call App</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #f0f2f5;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    h1 {
+      text-align: center;
+      color: #333;
+    }
+    .video-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      margin-top: 20px;
+    }
+    .video-item {
+      position: relative;
+      background-color: #000;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .local-video-container {
+      width: 100%;
+      max-width: 300px;
+      margin: 0 auto 20px;
+    }
+    .remote-video-container {
+      width: 100%;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      justify-content: center;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      background-color: #222;
+      border-radius: 8px;
+    }
+    .controls {
+      display: flex;
+      justify-content: center;
+      margin-top: 20px;
+      gap: 10px;
+    }
+    button {
+      padding: 10px 20px;
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #45a049;
+    }
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    .room-container {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    input {
+      padding: 10px;
+      width: 300px;
+      border-radius: 4px;
+      border: 1px solid #ddd;
+    }
+    .user-label {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      background-color: rgba(0, 0, 0, 0.5);
+      color: white;
+      padding: 5px 10px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Video Call App</h1>
+    
+    <div class="room-container">
+      <input type="text" id="roomIdInput" placeholder="Enter Room ID">
+      <button id="joinBtn">Join Room</button>
+      <button id="createBtn">Create New Room</button>
+      <p id="roomDisplay"></p>
+    </div>
+    
+    <div class="video-container">
+      <div class="local-video-container">
+        <div class="video-item">
+          <video id="localVideo" autoplay muted playsinline></video>
+          <div class="user-label">You</div>
+        </div>
+      </div>
+      
+      <div class="remote-video-container" id="remoteVideosContainer">
+        <!-- Remote videos will be added here dynamically -->
+      </div>
+    </div>
+    
+    <div class="controls">
+      <button id="muteBtn">Mute</button>
+      <button id="videoBtn">Turn Off Video</button>
+      <button id="leaveBtn" disabled>Leave Call</button>
+    </div>
+  </div>
+  
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    // Connect to Socket.IO server
+    const socket = io({
+      reconnectionAttempts: 5,
+      timeout: 10000
+    });
+    
+    // DOM elements
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideosContainer = document.getElementById('remoteVideosContainer');
+    const roomIdInput = document.getElementById('roomIdInput');
+    const joinBtn = document.getElementById('joinBtn');
+    const createBtn = document.getElementById('createBtn');
+    const muteBtn = document.getElementById('muteBtn');
+    const videoBtn = document.getElementById('videoBtn');
+    const leaveBtn = document.getElementById('leaveBtn');
+    const roomDisplay = document.getElementById('roomDisplay');
+    
+    // Variables
+    let localStream;
+    let roomId;
+    let userId;
+    let peers = {};
+    
+    // Get user media (camera and microphone)
+    // Enhanced setupLocalStream function with device selection and better error handling
+    async function setupMediaStream() {
+  try {
+    // Get both audio and video directly
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      },
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        facingMode: 'user'
+      }
+    });
+    
+    // Set the stream to video element
+    localVideo.srcObject = localStream;
+    
+    // Update UI based on tracks
+    const hasVideo = localStream.getVideoTracks().length > 0;
+    const hasAudio = localStream.getAudioTracks().length > 0;
+    
+    videoBtn.textContent = hasVideo ? 'Turn Off Video' : 'Video Disabled';
+    videoBtn.disabled = !hasVideo;
+    
+    muteBtn.textContent = 'Mute';
+    muteBtn.disabled = !hasAudio;
+    
+    return true;
+  } catch (error) {
+    console.error('Error accessing media devices:', error);
+    
+    if (error.name === 'NotAllowedError') {
+      alert('Permission denied. Please allow camera and microphone access.');
+    } else {
+      alert('Error accessing media devices: ' + error.message);
+    }
+    
+    return false;
+  }
+}
+    
+    // Create a new room
+    createBtn.addEventListener('click', async () => {
+      // Generate a random room ID
+      roomId = Math.random().toString(36).substring(2, 15);
+      roomIdInput.value = roomId;
+      
+      if (await setupMediaStream()) {
+        joinRoom();
+      }
+    });
+    
+    // Join an existing room
+    joinBtn.addEventListener('click', async () => {
+      roomId = roomIdInput.value.trim();
+      
+      if (!roomId) {
+        alert('Please enter a Room ID');
+        return;
+      }
+      
+      if (await setupMediaStream()) {
+        joinRoom();
+      }
+    });
+    
+    // Join room function
+    function joinRoom() {
+      // Generate a random user ID
+      userId = Math.random().toString(36).substring(2, 15);
+      
+      // Enable the leave button
+      leaveBtn.disabled = false;
+      createBtn.disabled = true;
+      joinBtn.disabled = true;
+      
+      // Display room info
+      roomDisplay.textContent = `Connected to room: ${roomId}`;
+      
+      // Connection status indicator
+      const statusIndicator = document.createElement('div');
+      statusIndicator.id = 'connectionStatus';
+      statusIndicator.style.padding = '5px 10px';
+      statusIndicator.style.backgroundColor = '#FFC107';
+      statusIndicator.style.borderRadius = '4px';
+      statusIndicator.style.margin = '10px auto';
+      statusIndicator.style.maxWidth = '300px';
+      statusIndicator.style.textAlign = 'center';
+      statusIndicator.textContent = 'Connecting to room...';
+      roomDisplay.parentNode.insertBefore(statusIndicator, roomDisplay.nextSibling);
+      
+      // Join the room
+      socket.emit('join-room', roomId, userId);
+      
+      // Listen for new users
+      socket.on('user-connected', (newUserId) => {
+        console.log('User connected:', newUserId);
+        statusIndicator.style.backgroundColor = '#4CAF50';
+        statusIndicator.textContent = 'Connected! Other user joined.';
+        connectToNewUser(newUserId);
+      });
+      
+      // Handle user disconnection
+      socket.on('user-disconnected', (disconnectedUserId) => {
+        console.log('User disconnected:', disconnectedUserId);
+        statusIndicator.style.backgroundColor = '#FFC107';
+        statusIndicator.textContent = 'Other user disconnected. Waiting for users...';
+        
+        if (peers[disconnectedUserId]) {
+          peers[disconnectedUserId].close();
+          delete peers[disconnectedUserId];
+          
+          // Remove video element
+          const videoElement = document.getElementById(`video-${disconnectedUserId}`);
+          if (videoElement) {
+            videoElement.parentElement.remove();
+          }
+        }
+      });
+      
+      // Handle WebRTC signaling
+      socket.on('offer', async (offer, fromUserId) => {
+        try {
+          const peerConnection = createPeerConnection(fromUserId);
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+          
+          const answer = await peerConnection.createAnswer();
+          await peerConnection.setLocalDescription(answer);
+          
+          socket.emit('answer', answer, roomId, userId);
+        } catch (error) {
+          console.error('Error handling offer:', error);
+          statusIndicator.style.backgroundColor = '#F44336';
+          statusIndicator.textContent = 'Connection error. Try refreshing.';
+        }
+      });
+      
+      socket.on('answer', async (answer, fromUserId) => {
+        try {
+          const peerConnection = peers[fromUserId];
+          if (peerConnection) {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+            statusIndicator.style.backgroundColor = '#4CAF50';
+            statusIndicator.textContent = 'Connected! Call in progress.';
+          }
+        } catch (error) {
+          console.error('Error handling answer:', error);
+          statusIndicator.style.backgroundColor = '#F44336';
+          statusIndicator.textContent = 'Connection error. Try refreshing.';
+        }
+      });
+      
+      socket.on('ice-candidate', async (candidate, fromUserId) => {
+        try {
+          const peerConnection = peers[fromUserId];
+          if (peerConnection) {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+          }
+        } catch (error) {
+          console.error('Error adding ICE candidate:', error);
+        }
+      });
+      
+      // Socket connection error handling
+      socket.on('connect_error', (error) => {
+        console.error('Socket connection error:', error);
+        statusIndicator.style.backgroundColor = '#F44336';
+        statusIndicator.textContent = 'Server connection error. Check your network.';
+      });
+      
+      socket.on('connect_timeout', () => {
+        console.error('Socket connection timeout');
+        statusIndicator.style.backgroundColor = '#F44336';
+        statusIndicator.textContent = 'Server connection timeout. Try refreshing.';
+      });
+    }
+    
+    // Connect to a new user
+    async function connectToNewUser(newUserId) {
+      const peerConnection = createPeerConnection(newUserId);
+      
+      // Add local stream tracks to peer connection
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
+          peerConnection.addTrack(track, localStream);
+        });
+      }
+      
+      try {
+        // Create offer
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        
+        // Send offer to the new user
+        socket.emit('offer', offer, roomId, userId);
+      } catch (error) {
+        console.error('Error creating offer:', error);
+        alert('Failed to connect to another user. Please try refreshing the page.');
+      }
+    }
+    
+    // Create a new peer connection
+    function createPeerConnection(peerId) {
+      // ICE servers (STUN/TURN) for NAT traversal
+      const iceServers = {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' },
+          { urls: 'stun:stun3.l.google.com:19302' },
+          { urls: 'stun:stun4.l.google.com:19302' }
+        ]
+      };
+      
+      const peerConnection = new RTCPeerConnection(iceServers);
+      peers[peerId] = peerConnection;
+      
+      // Handle ICE candidates
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('ice-candidate', event.candidate, roomId, userId);
+        }
+      };
+      
+      // Handle incoming tracks (remote stream)
+      peerConnection.ontrack = (event) => {
+        const stream = event.streams[0];
+        
+        // Check if video element already exists
+        let videoElement = document.getElementById(`video-${peerId}`);
+        
+        if (!videoElement) {
+          // Create video container
+          const videoContainer = document.createElement('div');
+          videoContainer.className = 'video-item';
+          
+          // Create video element
+          videoElement = document.createElement('video');
+          videoElement.id = `video-${peerId}`;
+          videoElement.autoplay = true;
+          videoElement.playsInline = true;
+          
+          // Create user label
+          // Create user label
+          const userLabel = document.createElement('div');
+          userLabel.className = 'user-label';
+          userLabel.textContent = `User ${peerId.substring(0, 5)}`;
+          
+          // Append elements
+          videoContainer.appendChild(videoElement);
+          videoContainer.appendChild(userLabel);
+          remoteVideosContainer.appendChild(videoContainer);
+        }
+        
+        // Set video source
+        videoElement.srcObject = stream;
+      };
+      
+      // Connection state change handling
+      peerConnection.onconnectionstatechange = () => {
+        console.log(`Connection state with ${peerId}: ${peerConnection.connectionState}`);
+        
+        if (peerConnection.connectionState === 'failed' || 
+            peerConnection.connectionState === 'disconnected' || 
+            peerConnection.connectionState === 'closed') {
+          
+          // Remove video element
+          const videoElement = document.getElementById(`video-${peerId}`);
+          if (videoElement) {
+            videoElement.parentElement.remove();
+          }
+          
+          // Clean up peer connection
+          if (peers[peerId]) {
+            peers[peerId].close();
+            delete peers[peerId];
+          }
+        }
+      };
+      
+      // Handle ICE connection state
+      peerConnection.oniceconnectionstatechange = () => {
+        console.log(`ICE connection state with ${peerId}: ${peerConnection.iceConnectionState}`);
+        
+        const statusIndicator = document.getElementById('connectionStatus');
+        if (statusIndicator) {
+          if (peerConnection.iceConnectionState === 'connected' || 
+              peerConnection.iceConnectionState === 'completed') {
+            statusIndicator.style.backgroundColor = '#4CAF50';
+            statusIndicator.textContent = 'Connected! Call in progress.';
+          } else if (peerConnection.iceConnectionState === 'failed') {
+            statusIndicator.style.backgroundColor = '#F44336';
+            statusIndicator.textContent = 'Connection failed. Try refreshing.';
+          } else if (peerConnection.iceConnectionState === 'disconnected') {
+            statusIndicator.style.backgroundColor = '#FFC107';
+            statusIndicator.textContent = 'Connection interrupted. Trying to reconnect...';
+          }
+        }
+      };
+      
+      return peerConnection;
+    }
+    
+    // Handle mute/unmute
+    muteBtn.addEventListener('click', () => {
+      if (localStream) {
+        const audioTracks = localStream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          const isAudioEnabled = audioTracks[0].enabled;
+          audioTracks[0].enabled = !isAudioEnabled;
+          muteBtn.textContent = isAudioEnabled ? 'Unmute' : 'Mute';
+        }
+      }
+    });
+    
+    // Handle video on/off
+    videoBtn.addEventListener('click', () => {
+      if (localStream) {
+        const videoTracks = localStream.getVideoTracks();
+        if (videoTracks.length > 0) {
+          const isVideoEnabled = videoTracks[0].enabled;
+          videoTracks[0].enabled = !isVideoEnabled;
+          videoBtn.textContent = isVideoEnabled ? 'Turn On Video' : 'Turn Off Video';
+        }
+      }
+    });
+    
+    // Handle leave call
+    leaveBtn.addEventListener('click', () => {
+      // Close all peer connections
+      Object.values(peers).forEach(peer => {
+        peer.close();
+      });
+      peers = {};
+      
+      // Stop all tracks
+      if (localStream) {
+        localStream.getTracks().forEach(track => {
+          track.stop();
+        });
+      }
+      
+      // Clear video elements
+      localVideo.srcObject = null;
+      remoteVideosContainer.innerHTML = '';
+      
+      // Reset UI
+      createBtn.disabled = false;
+      joinBtn.disabled = false;
+      leaveBtn.disabled = true;
+      roomDisplay.textContent = '';
+      
+      // Remove status indicator
+      const statusIndicator = document.getElementById('connectionStatus');
+      if (statusIndicator) {
+        statusIndicator.remove();
+      }
+      
+      // Leave the room
+      socket.emit('leave-room', roomId, userId);
+      roomId = null;
+      userId = null;
+    });
+    
+    // Handle window beforeunload event
+    window.addEventListener('beforeunload', () => {
+      if (roomId && userId) {
+        socket.emit('leave-room', roomId, userId);
+        
+        // Close all peer connections
+        Object.values(peers).forEach(peer => {
+          peer.close();
+        });
+        
+        // Stop all tracks
+        if (localStream) {
+          localStream.getTracks().forEach(track => {
+            track.stop();
+          });
+        }
+      }
+    });
+    
+    // Add connection status message
+    function showNotification(message, type = 'info') {
+      const notification = document.createElement('div');
+      notification.className = 'notification';
+      notification.textContent = message;
+      
+      // Style based on type
+      notification.style.position = 'fixed';
+      notification.style.bottom = '20px';
+      notification.style.right = '20px';
+      notification.style.padding = '10px 20px';
+      notification.style.borderRadius = '4px';
+      notification.style.color = 'white';
+      notification.style.zIndex = '1000';
+      
+      if (type === 'error') {
+        notification.style.backgroundColor = '#F44336';
+      } else if (type === 'success') {
+        notification.style.backgroundColor = '#4CAF50';
+      } else {
+        notification.style.backgroundColor = '#2196F3';
+      }
+      
+      document.body.appendChild(notification);
+      
+      // Auto-hide after 5 seconds
+      setTimeout(() => {
+        if (notification.parentNode) {
+          notification.parentNode.removeChild(notification);
+        }
+      }, 5000);
+    }
+    
+    // Socket reconnection event handlers
+    socket.on('reconnect', (attemptNumber) => {
+      console.log(`Reconnected after ${attemptNumber} attempts`);
+      showNotification('Reconnected to server', 'success');
+      
+      // Rejoin room if needed
+      if (roomId && userId) {
+        socket.emit('join-room', roomId, userId);
+      }
+    });
+    
+    socket.on('reconnect_attempt', (attemptNumber) => {
+      console.log(`Reconnection attempt ${attemptNumber}`);
+      showNotification(`Reconnecting to server (attempt ${attemptNumber})...`, 'info');
+    });
+    
+    socket.on('reconnect_failed', () => {
+      console.log('Reconnection failed');
+      showNotification('Failed to reconnect to server. Please refresh the page.', 'error');
+    });
+    
+    // Responsive design adjustments
+    function adjustVideoLayout() {
+      const container = document.querySelector('.container');
+      const remoteVideoCount = remoteVideosContainer.children.length;
+      
+      if (window.innerWidth < 768) {
+        // Mobile view
+        remoteVideosContainer.style.flexDirection = 'column';
+        
+        // Adjust video item size
+        const videoItems = document.querySelectorAll('.video-item');
+        videoItems.forEach(item => {
+          item.style.width = '100%';
+          item.style.height = remoteVideoCount > 1 ? '200px' : '300px';
+        });
+      } else {
+        // Desktop view
+        remoteVideosContainer.style.flexDirection = 'row';
+        
+        // Adjust video item size
+        const videoItems = document.querySelectorAll('.remote-video-container .video-item');
+        videoItems.forEach(item => {
+          if (remoteVideoCount === 1) {
+            item.style.width = '100%';
+            item.style.height = '400px';
+          } else if (remoteVideoCount === 2) {
+            item.style.width = 'calc(50% - 10px)';
+            item.style.height = '300px';
+          } else {
+            item.style.width = 'calc(33.33% - 14px)';
+            item.style.height = '200px';
+          }
+        });
+      }
+    }
+    
+    // Adjust layout on window resize
+    window.addEventListener('resize', adjustVideoLayout);
+    
+    // Initial layout adjustment
+    adjustVideoLayout();
+  </script>
+</body>
+</html>
